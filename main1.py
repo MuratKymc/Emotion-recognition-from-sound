@@ -12,10 +12,14 @@ from sklearn.model_selection import train_test_split
 import xgboost as xgb
 from sklearn.metrics import classification_report
 from sklearn.preprocessing import LabelEncoder
-from pydub import AudioSegment
+from sklearn.preprocessing import OneHotEncoder
 import keras
+from keras.models import Sequential
+from keras.layers import Dense, LSTM, Dropout
+from keras.utils import to_categorical
 import tensorflow as tf
-from keras.preprocessing.sequence import pad_sequences
+import librosa
+import matplotlib.pyplot as plt
 
 
 
@@ -95,70 +99,97 @@ def text_analysis_prediction_maker(temp_model, independant_vals_df):
     predictions=model.predict(independant_vals_df['Content'])
     return predictions
 
+#Extracts the sound features
+def extract_sound_feature(audio_file, max_length=100):
+    audio, sr=librosa.load(audio_file, duration=4, offset=0.5)
+    mfcc = np.mean(librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=max_length).T, axis=0)
+    return mfcc
+
 #Importing sound files
 def import_sound_files(table_df, sound_df, folder_name):
     for i in range(len(table_df)):
        file_name = f"{folder_name}/{table_df['fileName'][i]}"
-       soundFile = np.array(AudioSegment.from_wav(file_name).get_array_of_samples())
+       features = extract_sound_feature(file_name, 40)
 
        temp_df=pd.DataFrame({
            'fileName': [table_df['fileName'][i]],
-           'soundFile': [soundFile]
+           'soundFile': [features]
            }) 
        sound_df=pd.concat([sound_df, temp_df], ignore_index=True)
     return sound_df
 
+def lstm_training_preprocess(table_df):
+    le_x = LabelEncoder()
+    enc_y = OneHotEncoder()
+    table_df['Sentiment'] = le_x.fit_transform(table_df['Sentiment']).astype(float)
+
+    #Adding "Sentiment" and "soundFile" column together
+    table_df['soundFile'] = np.array(table_df['soundFile'])
+    for i in range(len(table_df['soundFile'])):
+        table_df['soundFile'][i] = np.append(table_df['soundFile'][i], table_df['Sentiment'][i])
+    
+    x=table_df['soundFile']
+    y=enc_y.fit_transform(table_df[['Emotion']])
+
+
+    x = [i for i in x]
+    x = np.array(x)
+    x = np.expand_dims(x, -1)
+    y = y.toarray()
+
+    return x,y
+
 
 #Training LSTM model
 def lstm_model_training(table_df):
-    le_x = LabelEncoder()
-    le_y = LabelEncoder()
-    table_df['Sentiment'] = le_x.fit_transform(table_df['Sentiment'])
-    table_df['Emotion'] = le_y.fit_transform(table_df['Emotion'])
-
-
-    x=np.array(table_df[['Sentiment', 'soundFile']])
-    y=np.array(table_df['Emotion'])
-    print(x)
+    x, y= lstm_training_preprocess(table_df)
+    print(x.shape)
     print(y)
-
-
+    
     x_train, x_test, y_train, y_test= train_test_split(x, y, test_size=0.25, random_state=42)
-    x_train, x_validation, y_train, y_validation= train_test_split(x_train, y_train, test_size=0.2)
-
     
-    input_shape=(x_train.shape[0], x_train.shape[1])
-    print("input shape is: ", input_shape)
-    model= keras.Sequential()
-    
-    #Adding layers
-    model.add(keras.layers.LSTM(64, input_shape=x_train.shape))
-    #model.add(keras.layers.LSTM(64))
+    model = Sequential([
+        LSTM(123, return_sequences=False, input_shape=(41,1)),
+        Dense(64, activation='relu'),
+        Dropout(0.2),
+        Dense(32, activation='relu'),
+        Dropout(0.2),
+        Dense(6, activation='softmax')
+    ])
 
-    #Dense layers
-    model.add(keras.layers.Dense(64, activation= 'relu'))
-    model.add(keras.layers.Dropout(0.3))
-    
-    #Output layer
-    model.add(keras.layers.Dense(10, activation='softmax'))
-
-    #Compiling 
-    optimiser = keras.optimizers.Adam(learning_rate=0.0001)
-    model.compile(optimizer=optimiser,
-                  loss='sparse_categorical_crossentropy',
-                  metrics=['accuracy'])
-
+    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
     model.summary()
 
-    #Training
-    model.fit(x_train, y_train, validation_data=(x_validation, y_validation), batch_size=32, epochs=30)
+    history = model.fit(x_train, y_train, validation_split=0.2, epochs=100, batch_size=512, shuffle=True)
     loss, accuracy=model.evaluate(x_test, y_test, verbose=2)
     print('\nTest accuracy: ', accuracy)
+    plot_results(history)
 
     return model
 
 
+def plot_results(history):
+    epochs = list(range(100))
+    acc = history.history['accuracy']
+    val_acc = history.history['val_accuracy']
 
+    plt.plot(epochs, acc, label='train accuracy')
+    plt.plot(epochs, val_acc, label='val accuracy')
+    plt.xlabel('epochs')
+    plt.ylabel('accuracy')
+    plt.legend()
+    plt.show()
+
+    
+    """loss = history.history['loss']
+    val_loss = history.history['val_loss']
+
+    plt.plot(epochs, loss, label='train loss')
+    plt.plot(epochs, val_loss, label='val loss')
+    plt.xlabel('epochs')
+    plt.ylabel('loss')
+    plt.legend()
+    plt.show()"""
 
 
     
@@ -189,7 +220,6 @@ for i in range(len(document_df)):
 #table_df.to_excel('result.xlsx', index=False) #delete this at the end   
 table_df=pd.read_excel('result.xlsx') # Delete this at the end we don't need to read excel
 document_df.drop(document_df.index, inplace=True)
-
 
 #Preprocessing
 table_df=table_df.dropna()
